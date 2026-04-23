@@ -1,14 +1,9 @@
 /**
- * METALOTUBO — Apps Script webhook
+ * METALOTUBO — Apps Script webhook (v2 — com máquinas)
  */
 
-function doGet(e) {
-  return _handle(e, "GET");
-}
-
-function doPost(e) {
-  return _handle(e, "POST");
-}
+function doGet(e) { return _handle(e, "GET"); }
+function doPost(e) { return _handle(e, "POST"); }
 
 function _handle(e, method) {
   try {
@@ -60,6 +55,10 @@ function _handle(e, method) {
         result = _appendRow(ss, "receptions_mobile", params.row || {});
         break;
 
+      case "post_maquina_loc":
+        result = _appendRow(ss, "maquinas_mobile", params.row || {});
+        break;
+
       default:
         result = { error: "Ação desconhecida: " + action };
     }
@@ -95,9 +94,15 @@ function _readTab(ss, nome) {
 function _appendRow(ss, nome, rowObj) {
   var ws = ss.getSheetByName(nome);
   if (!ws) {
-    throw new Error("Worksheet '" + nome + "' não existe. Corre 'Enviar dados-mestre' no ERP primeiro.");
+    // Auto-cria worksheet com os headers da rowObj
+    ws = ss.insertSheet(nome);
+    ws.appendRow(Object.keys(rowObj));
   }
-  var headers = ws.getRange(1, 1, 1, ws.getLastColumn()).getValues()[0];
+  var headers = ws.getRange(1, 1, 1, Math.max(ws.getLastColumn(), 1)).getValues()[0];
+  if (!headers || headers.length === 0 || headers[0] === "") {
+    headers = Object.keys(rowObj);
+    ws.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
   var linha = headers.map(function (h) {
     var v = rowObj[h];
     return v === undefined || v === null ? "" : v;
