@@ -1,7 +1,7 @@
 Como criar os 2 Secrets no GitHub
 Secrets são variáveis privadas que o GitHub Actions usa sem ficarem visíveis no código.
 ---
-SECRET 1 — `GOOGLE\_SHEET\_ID` (fácil, 30 segundos)
+SECRET 1 — `GOOGLE_SHEET_ID` (fácil, 30 segundos)
 Abre a tua Google Sheet no browser.
 Olha para o URL:
 ```
@@ -11,22 +11,22 @@ Olha para o URL:
 Copia apenas essa parte (entre `/d/` e `/edit`).
 No GitHub:
 Settings → Secrets and variables → Actions → New repository secret
-Name: `GOOGLE\_SHEET\_ID`
+Name: `GOOGLE_SHEET_ID`
 Secret: cola o ID copiado
 Add secret
 ---
-SECRET 2 — `GOOGLE\_CREDENTIALS\_B64` (2 minutos)
+SECRET 2 — `GOOGLE_CREDENTIALS_B64` (2 minutos)
 Precisamos de converter o `credentials.json` em texto base64.
 Se tens Windows:
 Pressiona Tecla Windows + R → escreve `powershell` → Enter.
 No PowerShell, cola o comando abaixo a substituir o caminho pelo teu:
 ```powershell
-   \[Convert]::ToBase64String(\[IO.File]::ReadAllBytes("C:\\MetaloTubo\\credentials.json")) | Set-Clipboard
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\MetaloTubo\credentials.json")) | Set-Clipboard
    ```
 (o texto base64 é copiado AUTOMATICAMENTE para a área de transferência)
 Volta ao GitHub:
 Settings → Secrets and variables → Actions → New repository secret
-Name: `GOOGLE\_CREDENTIALS\_B64`
+Name: `GOOGLE_CREDENTIALS_B64`
 Secret: Ctrl+V (cola o texto base64 — é muito longo, normal)
 Add secret
 Se tens Mac:
@@ -36,7 +36,7 @@ Cola (substitui caminho):
    base64 -i /Users/tu/credentials.json | pbcopy
    ```
 Volta ao GitHub → New repository secret:
-Name: `GOOGLE\_CREDENTIALS\_B64`
+Name: `GOOGLE_CREDENTIALS_B64`
 Secret: Cmd+V
 Add secret
 Alternativa gráfica (qualquer SO):
@@ -48,6 +48,6 @@ Cola no campo Secret no GitHub
 ---
 ✅ Verificar
 Depois de criar os 2, na página Settings → Secrets deves ver:
-🔒 `GOOGLE\_CREDENTIALS\_B64`
-🔒 `GOOGLE\_SHEET\_ID`
+🔒 `GOOGLE_CREDENTIALS_B64`
+🔒 `GOOGLE_SHEET_ID`
 Se sim, avança para correr o workflow.
