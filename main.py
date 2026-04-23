@@ -1,43 +1,22 @@
 """
 MetaloTubo Mobile — APK para encarregados de obra.
-App Flet simplificada que comunica com uma Google Sheet partilhada
-(mesmo service account que o ERP do escritório).
-
-Funcionalidades:
-  - Login simples (validado contra sheet `users`)
-  - Criar Pedido (Consumíveis / Material / Máquinas)
-  - Histórico da obra (últimos 20 pedidos feitos pelo mobile)
-
-Arquitetura:
-  - Lê `obras`, `consumiveis`, `maquinas`, `users` da Google Sheet (master)
-  - Escreve novos pedidos em `pedidos_mobile` (cada linha = 1 artigo)
-  - O ERP do PC chama `push_master_to_sheets()` para atualizar master
-  - O ERP do PC chama `pull_pedidos_from_sheets()` para importar os pedidos
-
-Build APK:
-  $ flet build apk  (ver .github/workflows/build_apk.yml)
-
-Credenciais:
-  O ficheiro `credentials.json` (service account) deve estar em `assets/credentials.json`
-  (bundled no APK via `flet build apk --assets assets`).
-  O `sheet_id` é lido de `assets/sheet_id.txt` ou variável embutida abaixo.
+Comunicação via Google Apps Script webhook (sem dependências pesadas).
 """
 
 from __future__ import annotations
 
 import os
-import sys
 import json
 import uuid
 import time
+import tempfile
 import traceback
+import urllib.request
+import urllib.error
 from datetime import datetime
 
 import flet as ft
 
-# --- CONFIG ---
-# Em APK, os assets ficam em /storage/emulated/0/... ou na pasta `assets/` empacotada.
-# Durante `flet build apk --assets assets`, o próprio Flet resolve o caminho.
 APP_TITLE = "MetaloTubo Mobile"
 COR_PRIMARIA = "#1A237E"
 COR_SECUNDARIA = "#0D47A1"
@@ -45,73 +24,45 @@ COR_OK = "#2E7D32"
 COR_ERRO = "#C62828"
 COR_URG = "#D32F2F"
 
-# --- IMPORTS PROTEGIDOS (para rodar no IDE sem dependências) ---
-try:
-    import gspread  # type: ignore
-    from google.oauth2.service_account import Credentials as GoogleCreds  # type: ignore
-    _GSPREAD_OK = True
-except Exception:
-    _GSPREAD_OK = False
-    gspread = None
-    GoogleCreds = None
 
-GSHEETS_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+# ---------------------------------------------------------------------
+# Paths — tudo gravado em FLET_APP_STORAGE_DATA (privado da APK)
+# ---------------------------------------------------------------------
 
-
-def _assets_path(*parts) -> str:
-    """Devolve caminho relativo à pasta assets (onde está credentials.json).
-
-    Flet em APK copia a pasta `assets/` para dentro do storage da app.
-    Procuramos em várias localizações possíveis.
-    """
-    base_candidates = [
-        # Flet em APK: FLET_APP_STORAGE_DATA aponta para o dir privado
-        os.path.join(os.environ.get("FLET_APP_STORAGE_DATA", ""), "assets"),
-        # Flet em APK: assets bundled junto ao main.py
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"),
-        # Desktop run
-        os.path.join(os.getcwd(), "assets"),
-    ]
-    for base in base_candidates:
-        if not base:
-            continue
-        p = os.path.join(base, *parts)
-        if os.path.exists(p):
-            return p
-    # Devolve o 1º candidato escrevível mesmo que não exista
-    return os.path.join(base_candidates[1], *parts)
-
-
-def _local_config_path() -> str:
-    """Guarda credenciais do utilizador entre sessões.
-
-    Em Android/iOS (APK), o Flet define FLET_APP_STORAGE_DATA que aponta para
-    o diretório privado da app, com permissões de escrita.
-    Em desktop (Windows/Linux/macOS), usa ~/.metalotubo_mobile.
-    """
-    base = os.environ.get("FLET_APP_STORAGE_DATA")
-    if not base:
+def _storage_dir() -> str:
+    base = os.environ.get("FLET_APP_STORAGE_DATA") or ""
+    if not base or not os.path.isdir(os.path.dirname(base) or base):
         home = os.path.expanduser("~")
-        # Se home não existir ou for root (Android sem storage), usa /tmp
         if not home or home in ("/", "~") or not os.path.isdir(home):
-            import tempfile
             home = tempfile.gettempdir()
         base = os.path.join(home, ".metalotubo_mobile")
     try:
         os.makedirs(base, exist_ok=True)
     except PermissionError:
-        # Último recurso: /tmp
-        import tempfile
         base = os.path.join(tempfile.gettempdir(), "metalotubo_mobile")
         os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "login.json")
+    return base
+
+
+def _login_file() -> str:
+    return os.path.join(_storage_dir(), "login.json")
+
+
+def _assets_path(*parts) -> str:
+    """Devolve caminho de assets (bundled no APK)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in [
+        os.path.join(here, "assets"),
+        os.path.join(os.getcwd(), "assets"),
+    ]:
+        p = os.path.join(base, *parts)
+        if os.path.exists(p):
+            return p
+    return os.path.join(here, "assets", *parts)
 
 
 def load_login() -> dict:
-    p = _local_config_path()
+    p = _login_file()
     if os.path.exists(p):
         try:
             with open(p, "r", encoding="utf-8") as f:
@@ -123,16 +74,15 @@ def load_login() -> dict:
 
 def save_login(data: dict) -> None:
     try:
-        with open(_local_config_path(), "w", encoding="utf-8") as f:
+        with open(_login_file(), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("save_login failed:", e)
 
 
-def _load_bundled_sheet_id() -> str:
-    """Tenta ler sheet_id.txt bundled em assets/ (criado pelo workflow)."""
+def _load_bundled_webhook() -> str:
     try:
-        p = _assets_path("sheet_id.txt")
+        p = _assets_path("webhook_url.txt")
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 return f.read().strip()
@@ -141,57 +91,70 @@ def _load_bundled_sheet_id() -> str:
     return ""
 
 
-# =====================================================================
-# CLIENTE GOOGLE SHEETS
-# =====================================================================
-class SheetsClient:
-    """Wrapper fino sobre gspread, com cache de worksheets."""
-
+# ---------------------------------------------------------------------
+# Cliente Apps Script
+# ---------------------------------------------------------------------
+class WebhookClient:
     def __init__(self):
-        self._client = None
-        self._sheet = None
-        self._tabs: dict = {}
-        self._last_read: dict = {}  # cache TTL curto
+        self.url: str = ""
+        self._cache: dict = {}
 
-    def connect(self, creds_path: str, sheet_id: str):
-        if not _GSPREAD_OK:
-            raise RuntimeError("gspread não instalado. Build do APK com flet build apk.")
-        if not os.path.exists(creds_path):
-            raise RuntimeError(f"credentials.json não encontrado em {creds_path}")
-        creds = GoogleCreds.from_service_account_file(creds_path, scopes=GSHEETS_SCOPES)
-        self._client = gspread.authorize(creds)
-        self._sheet = self._client.open_by_key(sheet_id)
-        self._tabs = {ws.title: ws for ws in self._sheet.worksheets()}
+    def connect(self, url: str):
+        if not url or not url.startswith("https://"):
+            raise RuntimeError("URL do Apps Script inválida.")
+        self.url = url.rstrip("/")
+        # Testa ligação
+        r = self.call("ping", {}, ttl=0)
+        if not r.get("ok"):
+            raise RuntimeError("Resposta inesperada do webhook: " + str(r))
 
-    def ws(self, nome: str):
-        if nome in self._tabs:
-            return self._tabs[nome]
+    def call(self, action: str, params: dict = None, ttl: int = 30):
+        if not self.url:
+            raise RuntimeError("Webhook não configurado.")
+        payload = {"action": action}
+        payload.update(params or {})
+
+        # Cache só para leituras
+        cache_key = None
+        if action.startswith("get_") and ttl > 0:
+            cache_key = json.dumps(payload, sort_keys=True)
+            cached = self._cache.get(cache_key)
+            if cached and time.time() - cached[0] < ttl:
+                return cached[1]
+
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
         try:
-            w = self._sheet.worksheet(nome)
-            self._tabs[nome] = w
-            return w
-        except Exception:
-            raise RuntimeError(f"Worksheet '{nome}' não existe na Sheet.")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            try:
+                raw = e.read().decode("utf-8")
+            except Exception:
+                raw = str(e)
+            raise RuntimeError(f"HTTP {e.code}: {raw[:200]}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Ligação falhou: {e.reason}")
 
-    def read(self, nome: str, ttl: int = 30) -> list:
-        """Lê worksheet como lista de dicts. Cache TTL em segundos."""
-        now = time.time()
-        cached = self._last_read.get(nome)
-        if cached and now - cached[0] < ttl:
-            return cached[1]
-        data = self.ws(nome).get_all_records()
-        self._last_read[nome] = (now, data)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            raise RuntimeError(f"Resposta inválida: {raw[:200]}")
+
+        if isinstance(data, dict) and data.get("error"):
+            raise RuntimeError(data["error"])
+
+        if cache_key:
+            self._cache[cache_key] = (time.time(), data)
         return data
 
-    def append(self, nome: str, row_values: list):
-        w = self.ws(nome)
-        # append_row evita colisões com escritas simultâneas
-        w.append_row(row_values, value_input_option="RAW")
 
-
-# =====================================================================
+# ---------------------------------------------------------------------
 # APP
-# =====================================================================
+# ---------------------------------------------------------------------
 def main(page: ft.Page):
     page.title = APP_TITLE
     page.bgcolor = "#F0F2F5"
@@ -200,10 +163,9 @@ def main(page: ft.Page):
     page.scroll = ft.ScrollMode.AUTO
     page.window_min_width = 360
 
-    client = SheetsClient()
-    state = {"user": None, "obra": None}
+    client = WebhookClient()
+    state = {"user": None}
 
-    # -------- helpers UI --------
     def snack(msg: str, cor: str = "green"):
         page.snack_bar = ft.SnackBar(ft.Text(msg, color="white"), bgcolor=cor)
         page.snack_bar.open = True
@@ -216,43 +178,41 @@ def main(page: ft.Page):
             bgcolor=COR_PRIMARIA, color="white",
         )
 
-    # -------- SETUP (1º uso: pedir caminho credentials + sheet_id) --------
+    # -------- SETUP --------
     def mostrar_setup():
         page.clean()
         login = load_login()
+        default_url = login.get("webhook_url") or _load_bundled_webhook()
 
-        # Tenta defaults: credentials bundled + sheet_id bundled (do workflow)
-        default_creds = login.get("credentials_path") or _assets_path("credentials.json")
-        default_sheet = login.get("sheet_id") or _load_bundled_sheet_id()
-
-        tf_creds = ft.TextField(label="Caminho credentials.json", value=default_creds)
-        tf_sheet = ft.TextField(
-            label="Sheet ID", value=default_sheet,
-            hint_text="Parte do URL da Sheet entre /d/ e /edit",
+        tf_url = ft.TextField(
+            label="URL do Apps Script",
+            value=default_url,
+            hint_text="https://script.google.com/macros/s/.../exec",
+            multiline=True, min_lines=1, max_lines=3,
         )
+        err = ft.Text("", color=COR_ERRO, size=12)
 
         def continuar(_=None):
             try:
-                client.connect(tf_creds.value.strip(), tf_sheet.value.strip())
-                login.update({
-                    "credentials_path": tf_creds.value.strip(),
-                    "sheet_id": tf_sheet.value.strip(),
-                })
+                url = (tf_url.value or "").strip()
+                client.connect(url)
+                login["webhook_url"] = url
                 save_login(login)
                 snack("Ligação OK!", COR_OK)
                 mostrar_login()
             except Exception as e:
-                snack(f"Falha: {e}", COR_ERRO)
+                err.value = f"Falha: {e}"
+                page.update()
 
         page.add(
             top_bar("Configuração inicial"),
             ft.Container(padding=20, content=ft.Column([
                 ft.Text("Primeira utilização", size=18, weight="bold"),
-                ft.Text("Indica o caminho do ficheiro credentials.json e o ID da Google "
-                        "Sheet partilhada pelo escritório.", size=12, color="grey"),
+                ft.Text("Cola a URL do Apps Script partilhada pelo escritório.",
+                        size=12, color="grey"),
                 ft.Container(height=10),
-                tf_creds,
-                tf_sheet,
+                tf_url,
+                err,
                 ft.Container(height=10),
                 ft.ElevatedButton("Continuar", icon=ft.icons.CHECK,
                                   on_click=continuar, bgcolor=COR_PRIMARIA,
@@ -264,14 +224,13 @@ def main(page: ft.Page):
     # -------- LOGIN --------
     def mostrar_login():
         login = load_login()
-        if not login.get("credentials_path") or not login.get("sheet_id"):
+        if not login.get("webhook_url"):
             return mostrar_setup()
-        # Garante que estamos ligados
-        if client._sheet is None:
+        if not client.url:
             try:
-                client.connect(login["credentials_path"], login["sheet_id"])
+                client.connect(login["webhook_url"])
             except Exception as e:
-                snack(f"Ligação falhou: {e}", COR_ERRO)
+                snack(f"Falha: {e}", COR_ERRO)
                 return mostrar_setup()
 
         page.clean()
@@ -282,49 +241,53 @@ def main(page: ft.Page):
 
         def entrar(_=None):
             nome = (tf_user.value or "").strip()
-            pwd = tf_pass.value or ""
-            if not nome or not pwd:
-                err.value = "Preenche utilizador e password."; page.update(); return
+            if not nome:
+                err.value = "Preenche o utilizador."
+                page.update()
+                return
             try:
-                users = client.read("users", ttl=10)
+                users = client.call("get_users", ttl=10)
             except Exception as e:
-                err.value = f"Erro: {e}"; page.update(); return
+                err.value = f"Erro: {e}"
+                page.update()
+                return
 
-            # No modo mobile, valida apenas username + ativo (a password real fica no PC).
-            # A password é usada em cliente como 2ª linha de defesa, mas como o PC tem o
-            # hash completo PBKDF2, aqui só fazemos fallback: user deve estar ativo.
             match = None
             for u in users:
                 if str(u.get("nome") or "").strip().lower() == nome.lower():
-                    match = u; break
+                    match = u
+                    break
             if not match:
-                err.value = "Utilizador não existe na Sheet."; page.update(); return
-            if str(match.get("ativo") or "True") != "True":
-                err.value = "Utilizador desativado."; page.update(); return
-            # OK (nota: validação de password completa fica no PC)
+                err.value = "Utilizador não existe."
+                page.update()
+                return
+            if str(match.get("ativo") or "True") not in ("True", "true", "1"):
+                err.value = "Utilizador desativado."
+                page.update()
+                return
             state["user"] = nome
             mostrar_portal()
+
+        logo_widget = ft.Image(
+            src=_assets_path("logo.png"),
+            width=220, height=150, fit=ft.ImageFit.CONTAIN,
+            error_content=ft.Text("METALOTUBO", size=28, weight="bold",
+                                    color=COR_PRIMARIA),
+        )
 
         page.add(
             ft.Container(padding=30, content=ft.Column([
                 ft.Container(height=10),
-                ft.Image(
-                    src=_assets_path("logo.png"),
-                    width=220,
-                    height=150,
-                    fit=ft.ImageFit.CONTAIN,
-                    error_content=ft.Text("METALOTUBO", size=28, weight="bold",
-                                           color=COR_PRIMARIA),
-                ),
+                logo_widget,
                 ft.Text("App de Obra", size=14, color="grey"),
                 ft.Container(height=25),
                 tf_user, tf_pass, err,
-                ft.Container(height=15),
+                ft.Container(height=10),
                 ft.ElevatedButton("ENTRAR", icon=ft.icons.LOGIN,
                                   on_click=entrar, height=55,
                                   bgcolor=COR_PRIMARIA, color="white"),
                 ft.TextButton("Reconfigurar", on_click=lambda e: mostrar_setup()),
-            ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+            ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER)),
         )
         page.update()
 
@@ -332,14 +295,14 @@ def main(page: ft.Page):
     def mostrar_portal():
         page.clean()
         page.add(
-            top_bar(f"Olá, {state['user']}", back=None),
+            top_bar(f"Olá, {state['user']}"),
             ft.Container(padding=20, content=ft.Column([
                 ft.Text("O que queres fazer?", size=18, weight="bold"),
                 ft.Container(height=10),
                 ft.ElevatedButton("NOVO PEDIDO", icon=ft.icons.ADD_SHOPPING_CART,
                                   height=80, bgcolor=COR_SECUNDARIA, color="white",
                                   on_click=lambda e: mostrar_pedido()),
-                ft.ElevatedButton("HISTÓRICO DA OBRA", icon=ft.icons.HISTORY,
+                ft.ElevatedButton("HISTÓRICO", icon=ft.icons.HISTORY,
                                   height=80, bgcolor=COR_PRIMARIA, color="white",
                                   on_click=lambda e: mostrar_historico()),
                 ft.Container(height=20),
@@ -354,9 +317,8 @@ def main(page: ft.Page):
     def mostrar_pedido():
         page.clean()
         try:
-            obras_rows = client.read("obras", ttl=60)
-            cons_rows = client.read("consumiveis", ttl=60)
-            maqs_rows = client.read("maquinas", ttl=60)
+            obras_rows = client.call("get_obras", ttl=60)
+            cons_rows = client.call("get_consumiveis", ttl=60)
         except Exception as e:
             snack(f"Erro a ler dados: {e}", COR_ERRO)
             return mostrar_portal()
@@ -371,12 +333,11 @@ def main(page: ft.Page):
         subs = sorted({str(r.get("subcategoria") or "")
                        for r in cons_rows if r.get("subcategoria")})
         dd_sub = ft.Dropdown(
-            label="Subcategoria (Consumíveis)",
+            label="Subcategoria",
             options=[ft.dropdown.Option("(Todas)")]
                      + [ft.dropdown.Option(s) for s in subs],
             value="(Todas)",
         )
-
         dd_item = ft.Dropdown(label="Item", options=[])
 
         def _items_para_sub(sub_sel: str):
@@ -395,8 +356,10 @@ def main(page: ft.Page):
             page.update()
         dd_sub.on_change = on_sub_change
 
-        tf_qtd = ft.TextField(label="Qtd", value="1", keyboard_type=ft.KeyboardType.NUMBER)
-        tf_det = ft.TextField(label="Detalhes (opcional)", hint_text="ex: urgente para amanhã")
+        tf_qtd = ft.TextField(label="Qtd", value="1",
+                               keyboard_type=ft.KeyboardType.NUMBER)
+        tf_det = ft.TextField(label="Detalhes (opcional)",
+                               hint_text="ex: urgente para amanhã")
         sw_urg = ft.Switch(label="URGENTE", active_color=COR_URG)
 
         def enviar(_=None):
@@ -409,23 +372,24 @@ def main(page: ft.Page):
                 qtd_i = int(float(qtd.replace(",", ".")))
             except Exception:
                 qtd_i = 1
-            row = [
-                str(uuid.uuid4()),                        # uuid
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # timestamp
-                state["user"] or "mobile",                # utilizador
-                dd_obra.value,                            # obra
-                "Consumíveis",                            # tipo
-                dd_sub.value or "",                       # subcategoria
-                dd_item.value,                            # item
-                tf_det.value or "",                       # detalhes
-                str(qtd_i),                               # qtd
-                "TRUE" if sw_urg.value else "FALSE",      # urgente
-                "",                                        # notas
-                "FALSE",                                   # processado
-            ]
+
+            row = {
+                "uuid": str(uuid.uuid4()),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "utilizador": state["user"] or "mobile",
+                "obra": dd_obra.value,
+                "tipo": "Consumíveis",
+                "subcategoria": dd_sub.value or "",
+                "item": dd_item.value,
+                "detalhes": tf_det.value or "",
+                "qtd": str(qtd_i),
+                "urgente": "TRUE" if sw_urg.value else "FALSE",
+                "notas": "",
+                "processado": "FALSE",
+            }
             try:
-                client.append("pedidos_mobile", row)
-                snack("✅ Pedido enviado!", COR_OK)
+                client.call("post_pedido", {"row": row}, ttl=0)
+                snack("Pedido enviado!", COR_OK)
                 mostrar_portal()
             except Exception as e:
                 snack(f"Falha a enviar: {e}", COR_ERRO)
@@ -439,12 +403,11 @@ def main(page: ft.Page):
                 tf_det,
                 ft.Container(height=10),
                 ft.ElevatedButton("ENVIAR PEDIDO", icon=ft.icons.SEND,
-                                  on_click=enviar, height=55, expand=True,
+                                  on_click=enviar, height=55,
                                   bgcolor=COR_OK, color="white"),
                 ft.Container(height=5),
-                ft.Text(f"💡 {len(cons_rows)} consumíveis disponíveis "
-                         f"em {len(subs)} subcategorias", size=11, italic=True,
-                         color="grey"),
+                ft.Text(f"{len(cons_rows)} consumíveis em {len(subs)} subcategorias",
+                         size=11, italic=True, color="grey"),
             ], spacing=12, scroll=ft.ScrollMode.AUTO)),
         )
         page.update()
@@ -453,22 +416,19 @@ def main(page: ft.Page):
     def mostrar_historico():
         page.clean()
         try:
-            rows = client.read("pedidos_mobile", ttl=10)
+            rows = client.call("get_historico",
+                                {"user": state["user"] or ""}, ttl=10)
         except Exception as e:
             snack(f"Erro: {e}", COR_ERRO)
             return mostrar_portal()
 
-        # Últimos 20 do próprio utilizador
-        meus = [r for r in rows if str(r.get("utilizador") or "") == (state["user"] or "")]
-        meus = meus[-20:][::-1]
-
-        if not meus:
+        if not rows:
             body = ft.Text("Sem pedidos.", italic=True)
         else:
             body_items = []
-            for r in meus:
-                proc = str(r.get("processado") or "").lower() in ("true", "1", "yes", "sim")
-                urg = str(r.get("urgente") or "").lower() in ("true", "1", "yes", "sim")
+            for r in rows:
+                proc = str(r.get("processado") or "").lower() in ("true", "1")
+                urg = str(r.get("urgente") or "").lower() in ("true", "1")
                 ts = str(r.get("timestamp") or "")[:16]
                 item = str(r.get("item") or "")
                 qtd = r.get("qtd") or ""
@@ -488,7 +448,7 @@ def main(page: ft.Page):
                             ),
                         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ft.Text(f"{item}  (x{qtd})", size=14, weight="bold"),
-                        ft.Text(f"📍 {obra}", size=12, color="grey"),
+                        ft.Text(f"{obra}", size=12, color="grey"),
                     ], spacing=3),
                 ))
             body = ft.Column(body_items, spacing=8)
