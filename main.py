@@ -307,10 +307,17 @@ def main(page: ft.Page):
 
         page.add(
             ft.Container(padding=30, content=ft.Column([
-                ft.Container(height=20),
-                ft.Text("METALOTUBO", size=30, weight="bold", color=COR_PRIMARIA),
+                ft.Container(height=10),
+                ft.Image(
+                    src=_assets_path("logo.png"),
+                    width=220,
+                    height=150,
+                    fit=ft.ImageFit.CONTAIN,
+                    error_content=ft.Text("METALOTUBO", size=28, weight="bold",
+                                           color=COR_PRIMARIA),
+                ),
                 ft.Text("App de Obra", size=14, color="grey"),
-                ft.Container(height=30),
+                ft.Container(height=25),
                 tf_user, tf_pass, err,
                 ft.Container(height=15),
                 ft.ElevatedButton("ENTRAR", icon=ft.icons.LOGIN,
