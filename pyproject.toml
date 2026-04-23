@@ -7,6 +7,8 @@ dependencies = [
     "flet==0.25.2",
     "gspread",
     "google-auth",
+    "google-auth-oauthlib",
+    "requests",
 ]
 
 [tool.flet]
@@ -14,8 +16,8 @@ org = "com.metalotubo"
 product = "MetaloTubo"
 company = "MetaloTubo"
 copyright = "Copyright (c) 2026 MetaloTubo"
-build_number = 1
-version = "1.0.0"
+build_number = 2
+version = "1.0.1"
 
 [tool.flet.app]
 path = "."
