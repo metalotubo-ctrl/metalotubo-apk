@@ -5,8 +5,8 @@ description = "MetaloTubo App Mobile"
 requires-python = ">=3.10,<4.0"
 dependencies = [
     "flet==0.25.2",
-    "gspread>=6.0,<7.0",
-    "google-auth>=2.0",
+    "gspread",
+    "google-auth",
 ]
 
 [tool.flet]
