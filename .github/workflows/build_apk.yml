@@ -1,12 +1,3 @@
-1. Nessa mesma página onde estás, clica no link azul "set up a workflow yourself →" (logo abaixo de "Get started with GitHub Actions")
-
-2. Vais ver um editor de texto com um ficheiro main.yml. No topo, renomeia de main.yml para:
-
-build_apk.yml
-3. Apaga todo o conteúdo da caixa grande de texto (Ctrl+A → Delete)
-
-4. Cola este conteúdo exato dentro da caixa:
-
 name: Build APK Android
 
 on:
@@ -40,9 +31,6 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter doctor
-        run: flutter doctor -v
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -61,15 +49,13 @@ jobs:
           mkdir -p assets
           if [ -n "${{ secrets.GOOGLE_CREDENTIALS_B64 }}" ]; then
             echo "${{ secrets.GOOGLE_CREDENTIALS_B64 }}" | base64 -d > assets/credentials.json
-            echo "credentials.json bundled do secret"
           fi
           if [ -n "${{ secrets.GOOGLE_SHEET_ID }}" ]; then
             echo -n "${{ secrets.GOOGLE_SHEET_ID }}" > assets/sheet_id.txt
           fi
 
       - name: Build APK
-        run: |
-          flet build apk --verbose
+        run: flet build apk --verbose
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
