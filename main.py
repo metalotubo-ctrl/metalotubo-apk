@@ -62,24 +62,51 @@ GSHEETS_SCOPES = [
 
 
 def _assets_path(*parts) -> str:
-    """Devolve caminho relativo à pasta assets (onde está credentials.json)."""
-    # Flet em APK expõe os assets através de `page.get_asset_src` mas para lermos
-    # o ficheiro diretamente (gspread precisa de path), usamos o diretório da app.
+    """Devolve caminho relativo à pasta assets (onde está credentials.json).
+
+    Flet em APK copia a pasta `assets/` para dentro do storage da app.
+    Procuramos em várias localizações possíveis.
+    """
     base_candidates = [
-        os.path.join(os.getcwd(), "assets"),
+        # Flet em APK: FLET_APP_STORAGE_DATA aponta para o dir privado
+        os.path.join(os.environ.get("FLET_APP_STORAGE_DATA", ""), "assets"),
+        # Flet em APK: assets bundled junto ao main.py
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"),
+        # Desktop run
+        os.path.join(os.getcwd(), "assets"),
     ]
     for base in base_candidates:
+        if not base:
+            continue
         p = os.path.join(base, *parts)
         if os.path.exists(p):
             return p
-    return os.path.join(base_candidates[0], *parts)
+    # Devolve o 1º candidato escrevível mesmo que não exista
+    return os.path.join(base_candidates[1], *parts)
 
 
 def _local_config_path() -> str:
-    """Guarda credenciais do utilizador entre sessões (no storage da APK)."""
-    base = os.path.join(os.path.expanduser("~"), ".metalotubo_mobile")
-    os.makedirs(base, exist_ok=True)
+    """Guarda credenciais do utilizador entre sessões.
+
+    Em Android/iOS (APK), o Flet define FLET_APP_STORAGE_DATA que aponta para
+    o diretório privado da app, com permissões de escrita.
+    Em desktop (Windows/Linux/macOS), usa ~/.metalotubo_mobile.
+    """
+    base = os.environ.get("FLET_APP_STORAGE_DATA")
+    if not base:
+        home = os.path.expanduser("~")
+        # Se home não existir ou for root (Android sem storage), usa /tmp
+        if not home or home in ("/", "~") or not os.path.isdir(home):
+            import tempfile
+            home = tempfile.gettempdir()
+        base = os.path.join(home, ".metalotubo_mobile")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except PermissionError:
+        # Último recurso: /tmp
+        import tempfile
+        base = os.path.join(tempfile.gettempdir(), "metalotubo_mobile")
+        os.makedirs(base, exist_ok=True)
     return os.path.join(base, "login.json")
 
 
@@ -95,8 +122,23 @@ def load_login() -> dict:
 
 
 def save_login(data: dict) -> None:
-    with open(_local_config_path(), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(_local_config_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("save_login failed:", e)
+
+
+def _load_bundled_sheet_id() -> str:
+    """Tenta ler sheet_id.txt bundled em assets/ (criado pelo workflow)."""
+    try:
+        p = _assets_path("sheet_id.txt")
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return ""
 
 
 # =====================================================================
@@ -178,12 +220,14 @@ def main(page: ft.Page):
     def mostrar_setup():
         page.clean()
         login = load_login()
-        tf_creds = ft.TextField(
-            label="Caminho credentials.json",
-            value=login.get("credentials_path") or _assets_path("credentials.json"),
-        )
+
+        # Tenta defaults: credentials bundled + sheet_id bundled (do workflow)
+        default_creds = login.get("credentials_path") or _assets_path("credentials.json")
+        default_sheet = login.get("sheet_id") or _load_bundled_sheet_id()
+
+        tf_creds = ft.TextField(label="Caminho credentials.json", value=default_creds)
         tf_sheet = ft.TextField(
-            label="Sheet ID", value=login.get("sheet_id") or "",
+            label="Sheet ID", value=default_sheet,
             hint_text="Parte do URL da Sheet entre /d/ e /edit",
         )
 
