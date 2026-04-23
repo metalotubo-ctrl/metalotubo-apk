@@ -300,16 +300,178 @@ def main(page: ft.Page):
                 ft.Text("O que queres fazer?", size=18, weight="bold"),
                 ft.Container(height=10),
                 ft.ElevatedButton("NOVO PEDIDO", icon=ft.icons.ADD_SHOPPING_CART,
-                                  height=80, bgcolor=COR_SECUNDARIA, color="white",
+                                  height=75, bgcolor=COR_SECUNDARIA, color="white",
                                   on_click=lambda e: mostrar_pedido()),
+                ft.ElevatedButton("MÁQUINAS", icon=ft.icons.PRECISION_MANUFACTURING,
+                                  height=75, bgcolor="#F57C00", color="white",
+                                  on_click=lambda e: mostrar_maquinas()),
                 ft.ElevatedButton("HISTÓRICO", icon=ft.icons.HISTORY,
-                                  height=80, bgcolor=COR_PRIMARIA, color="white",
+                                  height=75, bgcolor=COR_PRIMARIA, color="white",
                                   on_click=lambda e: mostrar_historico()),
-                ft.Container(height=20),
+                ft.Container(height=10),
                 ft.OutlinedButton("Sair", icon=ft.icons.LOGOUT,
                                   on_click=lambda e: (state.update({"user": None}),
                                                        mostrar_login())),
-            ], spacing=12)),
+            ], spacing=10)),
+        )
+        page.update()
+
+    # -------- MÁQUINAS (consultar + confirmar localização) --------
+    def mostrar_maquinas():
+        page.clean()
+        try:
+            obras_rows = client.call("get_obras", ttl=60)
+            maqs_rows = client.call("get_maquinas", ttl=30)
+        except Exception as e:
+            snack(f"Erro a ler dados: {e}", COR_ERRO)
+            return mostrar_portal()
+
+        obras_ativas = [str(r.get("nome")) for r in obras_rows
+                         if str(r.get("estado") or "Ativa") == "Ativa"]
+
+        state.setdefault("maq_obra_sel", obras_ativas[0] if obras_ativas else "")
+
+        dd_obra = ft.Dropdown(
+            label="Filtrar por obra (opcional)",
+            value=state.get("maq_obra_sel") or None,
+            options=[ft.dropdown.Option("(Todas)")]
+                     + [ft.dropdown.Option(o) for o in obras_ativas],
+        )
+
+        lista_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO)
+
+        def confirmar(n_interno: str, maq_nome: str, obra_sel: str):
+            if not obra_sel:
+                snack("Escolhe a obra primeiro.", COR_ERRO); return
+            row = {
+                "uuid": str(uuid.uuid4()),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "utilizador": state["user"] or "mobile",
+                "n_interno": n_interno,
+                "maquina": maq_nome,
+                "obra": obra_sel,
+                "notas": "",
+                "processado": "FALSE",
+            }
+            try:
+                client.call("post_maquina_loc", {"row": row}, ttl=0)
+                snack(f"✓ {n_interno} confirmado em {obra_sel}", COR_OK)
+                # Refresh cache e re-renderiza para atualizar visual
+                client._cache.pop(json.dumps({"action": "get_maquinas"},
+                                              sort_keys=True), None)
+                mostrar_maquinas()
+            except Exception as e:
+                snack(f"Falha: {e}", COR_ERRO)
+
+        def renderizar_lista():
+            lista_col.controls.clear()
+            obra_sel = dd_obra.value or ""
+
+            if obra_sel and obra_sel != "(Todas)":
+                filtradas = [r for r in maqs_rows
+                              if str(r.get("local") or "") == obra_sel]
+                # Mostra também máquinas sem local definido (candidatas)
+                sem_local = [r for r in maqs_rows
+                              if not str(r.get("local") or "").strip()]
+                if not filtradas and not sem_local:
+                    lista_col.controls.append(
+                        ft.Text(f"Sem máquinas em '{obra_sel}'.", italic=True)
+                    )
+                else:
+                    if filtradas:
+                        lista_col.controls.append(ft.Text(
+                            f"Já em '{obra_sel}' ({len(filtradas)})",
+                            size=13, weight="bold", color=COR_OK))
+                        for r in filtradas:
+                            lista_col.controls.append(_card_maq(r, obra_sel, True))
+                    if sem_local:
+                        lista_col.controls.append(ft.Container(height=10))
+                        lista_col.controls.append(ft.Text(
+                            f"Sem localização ({len(sem_local)})",
+                            size=13, weight="bold", color="#F57C00"))
+                        for r in sem_local:
+                            lista_col.controls.append(_card_maq(r, obra_sel, False))
+            else:
+                lista_col.controls.append(ft.Text(
+                    f"{len(maqs_rows)} máquinas totais",
+                    size=13, weight="bold", color=COR_PRIMARIA))
+                for r in maqs_rows:
+                    lista_col.controls.append(_card_maq(r, "", False))
+            page.update()
+
+        def _card_maq(r: dict, obra_atual: str, ja_la: bool):
+            n = str(r.get("n_interno") or "")
+            nome = str(r.get("maquina") or "")
+            estado = str(r.get("estado") or "")
+            local = str(r.get("local") or "—")
+            resp = str(r.get("responsavel") or "")
+
+            col_estado = {
+                "Disponível": COR_OK, "Operacional": COR_OK,
+                "Em reparação": COR_URG, "Avariada": COR_URG,
+                "Em uso": COR_PRIMARIA, "Ocupada": COR_PRIMARIA,
+            }.get(estado, "grey")
+
+            btn = None
+            if obra_atual and obra_atual != "(Todas)":
+                btn = ft.ElevatedButton(
+                    "CONFIRMAR AQUI" if not ja_la else "✓ Aqui",
+                    icon=ft.icons.PLACE if not ja_la else ft.icons.CHECK,
+                    bgcolor=COR_OK if not ja_la else "grey",
+                    color="white",
+                    disabled=ja_la,
+                    on_click=lambda e, ni=n, nm=nome, ob=obra_atual:
+                        confirmar(ni, nm, ob),
+                )
+
+            header = ft.Row([
+                ft.Text(n, size=14, weight="bold", color=COR_PRIMARIA),
+                ft.Container(
+                    bgcolor=col_estado, border_radius=10,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                    content=ft.Text(estado or "—", size=10, color="white",
+                                     weight="bold"),
+                ),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+
+            linha2 = ft.Text(nome, size=13)
+            linha3_items = [f"📍 {local}"]
+            if resp:
+                linha3_items.append(f"👤 {resp}")
+            linha3 = ft.Text("   ".join(linha3_items), size=11, color="grey")
+
+            col_content = [header, linha2, linha3]
+            if btn:
+                col_content.append(ft.Container(height=4))
+                col_content.append(btn)
+
+            return ft.Container(
+                bgcolor="white", border_radius=8, padding=12,
+                content=ft.Column(col_content, spacing=4),
+            )
+
+        def on_obra_change(_=None):
+            state["maq_obra_sel"] = dd_obra.value
+            renderizar_lista()
+        dd_obra.on_change = on_obra_change
+
+        renderizar_lista()
+
+        page.add(
+            top_bar("Máquinas", back=lambda e: mostrar_portal()),
+            ft.Container(
+                padding=15,
+                content=ft.Column([
+                    dd_obra,
+                    ft.Text(
+                        "Escolhe uma obra e confirma as máquinas que estão contigo.",
+                        size=11, italic=True, color="grey",
+                    ),
+                    ft.Divider(),
+                    lista_col,
+                ], scroll=ft.ScrollMode.AUTO, spacing=10, expand=True),
+                expand=True,
+            ),
         )
         page.update()
 
