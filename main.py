@@ -18,6 +18,7 @@ from datetime import datetime
 import flet as ft
 
 APP_TITLE = "MetaloTubo Mobile"
+APP_VERSION = "1.0.5"
 COR_PRIMARIA = "#1A237E"
 COR_SECUNDARIA = "#0D47A1"
 COR_OK = "#2E7D32"
@@ -234,9 +235,13 @@ def main(page: ft.Page):
                 return mostrar_setup()
 
         page.clean()
-        tf_user = ft.TextField(label="Utilizador", autofocus=True)
+        # Pré-preenche último utilizador
+        last_user = login.get("last_user") or ""
+        tf_user = ft.TextField(label="Utilizador", autofocus=not last_user,
+                                value=last_user)
         tf_pass = ft.TextField(label="Password", password=True,
-                                can_reveal_password=True)
+                                can_reveal_password=True,
+                                autofocus=bool(last_user))
         err = ft.Text("", color=COR_ERRO)
 
         def entrar(_=None):
@@ -265,12 +270,25 @@ def main(page: ft.Page):
                 err.value = "Utilizador desativado."
                 page.update()
                 return
+
+            # Guarda o último user para auto-preencher próxima vez
+            login["last_user"] = nome
+            save_login(login)
+
             state["user"] = nome
+            # Pré-cache paralelo de dados comuns para navegação mais rápida
+            try:
+                client.call("get_obras", ttl=120)
+                client.call("get_consumiveis", ttl=120)
+                client.call("get_maquinas", ttl=60)
+                client.call("get_catalogo_materiais", ttl=120)
+            except Exception:
+                pass  # ignora erros de pré-cache
             mostrar_portal()
 
         logo_widget = ft.Image(
             src=_assets_path("logo.png"),
-            width=220, height=150, fit=ft.ImageFit.CONTAIN,
+            width=200, height=130, fit=ft.ImageFit.CONTAIN,
             error_content=ft.Text("METALOTUBO", size=28, weight="bold",
                                     color=COR_PRIMARIA),
         )
@@ -280,16 +298,33 @@ def main(page: ft.Page):
                 ft.Container(height=10),
                 logo_widget,
                 ft.Text("App de Obra", size=14, color="grey"),
-                ft.Container(height=25),
+                ft.Container(height=20),
                 tf_user, tf_pass, err,
                 ft.Container(height=10),
                 ft.ElevatedButton("ENTRAR", icon=ft.icons.LOGIN,
                                   on_click=entrar, height=55,
                                   bgcolor=COR_PRIMARIA, color="white"),
                 ft.TextButton("Reconfigurar", on_click=lambda e: mostrar_setup()),
+                ft.Text(f"v{APP_VERSION}", size=10, color="grey"),
             ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER)),
         )
         page.update()
+        # Verificação de nova versão em background (não bloqueia login)
+        try:
+            ver_info = client.call("get_app_version", ttl=300)
+            latest = str(ver_info.get("current_version") or "").strip()
+            if latest and latest != APP_VERSION:
+                notas = str(ver_info.get("release_notes") or "")
+                page.snack_bar = ft.SnackBar(
+                    ft.Text(f"Nova versão disponível: v{latest}. {notas[:60]}",
+                             color="white"),
+                    bgcolor="#F57C00",
+                    duration=8000,
+                )
+                page.snack_bar.open = True
+                page.update()
+        except Exception:
+            pass
 
     # -------- PORTAL --------
     def mostrar_portal():
@@ -564,17 +599,16 @@ def main(page: ft.Page):
         )
         page.update()
 
-    # -------- NOVO PEDIDO --------
-    CATEGORIAS_MATERIAL = [
-        "Multicamada (mm)", "PPR (mm)", "Ferro", "Ferro roscado",
-        "Latão roscado", "Soldar Ferro", "Parafusos", "Outros",
-    ]
-
+    # -------- NOVO PEDIDO (carrinho multi-item) --------
     def mostrar_pedido():
         page.clean()
         try:
-            obras_rows = client.call("get_obras", ttl=60)
-            cons_rows = client.call("get_consumiveis", ttl=60)
+            obras_rows = client.call("get_obras", ttl=120)
+            cons_rows = client.call("get_consumiveis", ttl=120)
+            try:
+                mat_rows = client.call("get_catalogo_materiais", ttl=120)
+            except Exception:
+                mat_rows = []
         except Exception as e:
             snack(f"Erro a ler dados: {e}", COR_ERRO)
             return mostrar_portal()
@@ -617,20 +651,41 @@ def main(page: ft.Page):
 
         bloco_consumiveis = ft.Column([dd_sub, dd_item], spacing=10)
 
-        # --- Widgets Material ---
+        # --- Widgets Material (catálogo da Sheet) ---
+        cats_mat = sorted({str(r.get("categoria") or "") for r in mat_rows
+                            if r.get("categoria")})
+        if not cats_mat:
+            # Fallback se a Sheet ainda não tem catálogo (antes do 1º push)
+            cats_mat = ["Multicamada (mm)", "PPR (mm)", "Ferro", "Ferro roscado",
+                         "Latão roscado", "Soldar Ferro", "Parafusos", "Outros"]
+
         dd_cat = ft.Dropdown(
             label="Categoria",
-            options=[ft.dropdown.Option(c) for c in CATEGORIAS_MATERIAL],
-            value=CATEGORIAS_MATERIAL[0],
+            options=[ft.dropdown.Option(c) for c in cats_mat],
+            value=cats_mat[0] if cats_mat else None,
         )
-        tf_desc_mat = ft.TextField(
-            label="Descrição do material",
-            hint_text='Ex: Tubo galv. 1" 6m  |  Curva 90° 3/4" MxF',
-            multiline=True, min_lines=1, max_lines=3,
-        )
-        bloco_material = ft.Column([dd_cat, tf_desc_mat], spacing=10, visible=False)
+        dd_tipo = ft.Dropdown(label="Tipo", options=[])
 
-        # --- Radio Tipo ---
+        def _tipos_para_cat(cat_sel: str):
+            tipos = [r for r in mat_rows
+                      if str(r.get("categoria") or "") == cat_sel]
+            return [ft.dropdown.Option(str(r.get("tipo")))
+                     for r in tipos if str(r.get("tipo") or "").strip()]
+
+        def on_cat_change(_=None):
+            dd_tipo.options = _tipos_para_cat(dd_cat.value or "")
+            dd_tipo.value = None
+            page.update()
+        dd_cat.on_change = on_cat_change
+        if cats_mat:
+            dd_tipo.options = _tipos_para_cat(cats_mat[0])
+
+        tf_dim = ft.TextField(
+            label="Dimensão / detalhes",
+            hint_text='Ex: 1"  |  DN50  |  20mm  |  M8x60  |  3/4" MxF',
+        )
+        bloco_material = ft.Column([dd_cat, dd_tipo, tf_dim], spacing=10, visible=False)
+
         def on_tipo_change(e):
             tipo_state["tipo"] = e.control.value
             bloco_consumiveis.visible = (tipo_state["tipo"] == "Consumíveis")
@@ -646,28 +701,55 @@ def main(page: ft.Page):
             ], spacing=20),
         )
 
-        tf_qtd = ft.TextField(label="Qtd", value="1",
+        tf_qtd = ft.TextField(label="Qtd", value="1", width=100,
                                keyboard_type=ft.KeyboardType.NUMBER)
-        tf_det = ft.TextField(label="Detalhes / notas (opcional)",
-                               hint_text="ex: urgente para amanhã")
         sw_urg = ft.Switch(label="URGENTE", active_color=COR_URG)
 
-        def enviar(_=None):
-            if not dd_obra.value:
-                snack("Escolhe a obra.", COR_ERRO); return
+        # --- Carrinho (lista de itens para enviar) ---
+        carrinho: list[dict] = []
+        carrinho_col = ft.Column(spacing=4)
 
+        def atualiza_carrinho_ui():
+            carrinho_col.controls.clear()
+            if not carrinho:
+                carrinho_col.controls.append(
+                    ft.Text("(carrinho vazio — adiciona itens primeiro)",
+                             italic=True, color="grey", size=12)
+                )
+            else:
+                for idx, it in enumerate(carrinho):
+                    urg_mk = " 🔴" if it.get("urgente") else ""
+                    txt = f"{it['qtd']}× {it['item']}"
+                    if it.get("detalhes"):
+                        txt += f" ({it['detalhes']})"
+                    txt += f"  [{it['tipo']}]{urg_mk}"
+
+                    def _remover(e, i=idx):
+                        carrinho.pop(i)
+                        atualiza_carrinho_ui()
+
+                    carrinho_col.controls.append(ft.Row([
+                        ft.Text(txt, expand=1, size=12),
+                        ft.IconButton(ft.icons.DELETE, icon_color=COR_ERRO,
+                                       icon_size=18, on_click=_remover,
+                                       tooltip="Remover"),
+                    ], spacing=0))
+            page.update()
+
+        def adicionar(_=None):
             tipo = tipo_state["tipo"]
             if tipo == "Consumíveis":
                 if not dd_item.value:
                     snack("Escolhe o item.", COR_ERRO); return
                 item_v = dd_item.value
                 subcat_v = dd_sub.value or ""
-            else:  # Material
-                desc = (tf_desc_mat.value or "").strip()
-                if not desc:
-                    snack("Escreve a descrição do material.", COR_ERRO); return
-                item_v = desc
+                detalhes_v = ""
+            else:
+                if not dd_tipo.value:
+                    snack("Escolhe o tipo de material.", COR_ERRO); return
+                item_v = dd_tipo.value
                 subcat_v = dd_cat.value or ""
+                detalhes_v = (tf_dim.value or "").strip()
 
             qtd = (tf_qtd.value or "1").strip()
             try:
@@ -675,26 +757,58 @@ def main(page: ft.Page):
             except Exception:
                 qtd_i = 1
 
-            row = {
-                "uuid": str(uuid.uuid4()),
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "utilizador": state["user"] or "mobile",
-                "obra": dd_obra.value,
+            carrinho.append({
                 "tipo": tipo,
                 "subcategoria": subcat_v,
                 "item": item_v,
-                "detalhes": tf_det.value or "",
-                "qtd": str(qtd_i),
-                "urgente": "TRUE" if sw_urg.value else "FALSE",
-                "notas": "",
-                "processado": "FALSE",
-            }
-            try:
-                client.call("post_pedido", {"row": row}, ttl=0)
-                snack("Pedido enviado!", COR_OK)
-                mostrar_portal()
-            except Exception as e:
-                snack(f"Falha a enviar: {e}", COR_ERRO)
+                "detalhes": detalhes_v,
+                "qtd": qtd_i,
+                "urgente": bool(sw_urg.value),
+            })
+            # Limpa campos p/ adicionar mais
+            if tipo == "Consumíveis":
+                dd_item.value = None
+            else:
+                tf_dim.value = ""
+            tf_qtd.value = "1"
+            atualiza_carrinho_ui()
+
+        def enviar(_=None):
+            if not dd_obra.value:
+                snack("Escolhe a obra.", COR_ERRO); return
+            if not carrinho:
+                snack("Adiciona pelo menos 1 item.", COR_ERRO); return
+
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            utilizador = state["user"] or "mobile"
+            falhas = 0
+            for it in carrinho:
+                row = {
+                    "uuid": str(uuid.uuid4()),
+                    "timestamp": ts,
+                    "utilizador": utilizador,
+                    "obra": dd_obra.value,
+                    "tipo": it["tipo"],
+                    "subcategoria": it["subcategoria"],
+                    "item": it["item"],
+                    "detalhes": it["detalhes"],
+                    "qtd": str(it["qtd"]),
+                    "urgente": "TRUE" if it["urgente"] else "FALSE",
+                    "notas": "",
+                    "processado": "FALSE",
+                }
+                try:
+                    client.call("post_pedido", {"row": row}, ttl=0)
+                except Exception:
+                    falhas += 1
+            if falhas:
+                snack(f"Enviados {len(carrinho) - falhas}, falharam {falhas}",
+                       COR_URG)
+            else:
+                snack(f"✓ Pedido enviado com {len(carrinho)} item(s)!", COR_OK)
+            mostrar_portal()
+
+        atualiza_carrinho_ui()
 
         page.add(
             top_bar("Novo Pedido", back=lambda e: mostrar_portal()),
@@ -706,15 +820,24 @@ def main(page: ft.Page):
                 bloco_consumiveis,
                 bloco_material,
                 ft.Row([tf_qtd, sw_urg], spacing=10),
-                tf_det,
+                ft.ElevatedButton("+ ADICIONAR AO CARRINHO",
+                                   icon=ft.icons.ADD_SHOPPING_CART,
+                                   on_click=adicionar,
+                                   bgcolor=COR_SECUNDARIA, color="white",
+                                   height=45),
+                ft.Divider(),
+                ft.Text("Carrinho", size=14, weight="bold"),
+                carrinho_col,
                 ft.Container(height=10),
                 ft.ElevatedButton("ENVIAR PEDIDO", icon=ft.icons.SEND,
                                   on_click=enviar, height=55,
                                   bgcolor=COR_OK, color="white"),
                 ft.Container(height=5),
-                ft.Text(f"{len(cons_rows)} consumíveis em {len(subs)} subcategorias",
-                         size=11, italic=True, color="grey"),
-            ], spacing=12, scroll=ft.ScrollMode.AUTO)),
+                ft.Text(
+                    f"{len(cons_rows)} consumíveis · {len(mat_rows)} tipos de material",
+                    size=11, italic=True, color="grey",
+                ),
+            ], spacing=10, scroll=ft.ScrollMode.AUTO)),
         )
         page.update()
 
