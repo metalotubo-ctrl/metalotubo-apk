@@ -1,0 +1,20 @@
+[project]
+name = "metalotubo-mobile"
+version = "1.0.5"
+description = "MetaloTubo App Mobile"
+requires-python = ">=3.10,<4.0"
+dependencies = ["flet==0.25.2"]
+
+[tool.flet]
+org = "com.metalotubo"
+product = "MetaloTubo"
+company = "MetaloTubo"
+copyright = "Copyright (c) 2026 MetaloTubo"
+build_number = 6
+version = "1.0.5"
+
+[tool.flet.app]
+path = "."
+
+[tool.flet.android]
+package = "com.metalotubo.mobile"
