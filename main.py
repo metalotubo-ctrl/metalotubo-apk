@@ -300,13 +300,16 @@ def main(page: ft.Page):
                 ft.Text("O que queres fazer?", size=18, weight="bold"),
                 ft.Container(height=10),
                 ft.ElevatedButton("NOVO PEDIDO", icon=ft.icons.ADD_SHOPPING_CART,
-                                  height=75, bgcolor=COR_SECUNDARIA, color="white",
+                                  height=70, bgcolor=COR_SECUNDARIA, color="white",
                                   on_click=lambda e: mostrar_pedido()),
                 ft.ElevatedButton("MÁQUINAS", icon=ft.icons.PRECISION_MANUFACTURING,
-                                  height=75, bgcolor="#F57C00", color="white",
+                                  height=70, bgcolor="#F57C00", color="white",
                                   on_click=lambda e: mostrar_maquinas()),
+                ft.ElevatedButton("RECEÇÃO DE GÁS", icon=ft.icons.LOCAL_FIRE_DEPARTMENT,
+                                  height=70, bgcolor="#7B1FA2", color="white",
+                                  on_click=lambda e: mostrar_gas()),
                 ft.ElevatedButton("HISTÓRICO", icon=ft.icons.HISTORY,
-                                  height=75, bgcolor=COR_PRIMARIA, color="white",
+                                  height=70, bgcolor=COR_PRIMARIA, color="white",
                                   on_click=lambda e: mostrar_historico()),
                 ft.Container(height=10),
                 ft.OutlinedButton("Sair", icon=ft.icons.LOGOUT,
@@ -340,8 +343,9 @@ def main(page: ft.Page):
 
         lista_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO)
 
-        def confirmar(n_interno: str, maq_nome: str, obra_sel: str):
-            if not obra_sel:
+        def confirmar(n_interno: str, maq_nome: str, obra_sel: str,
+                       acao: str = "rececao", obra_destino: str = ""):
+            if acao == "rececao" and not obra_sel:
                 snack("Escolhe a obra primeiro.", COR_ERRO); return
             row = {
                 "uuid": str(uuid.uuid4()),
@@ -349,19 +353,58 @@ def main(page: ft.Page):
                 "utilizador": state["user"] or "mobile",
                 "n_interno": n_interno,
                 "maquina": maq_nome,
-                "obra": obra_sel,
+                "obra": obra_destino if acao == "expedicao" else obra_sel,
+                "acao": acao,
+                "obra_origem": obra_sel if acao == "expedicao" else "",
                 "notas": "",
                 "processado": "FALSE",
             }
             try:
                 client.call("post_maquina_loc", {"row": row}, ttl=0)
-                snack(f"✓ {n_interno} confirmado em {obra_sel}", COR_OK)
-                # Refresh cache e re-renderiza para atualizar visual
+                if acao == "rececao":
+                    snack(f"✓ {n_interno} confirmado em {obra_sel}", COR_OK)
+                else:
+                    snack(f"✓ {n_interno} enviado para {obra_destino}", COR_OK)
                 client._cache.pop(json.dumps({"action": "get_maquinas"},
                                               sort_keys=True), None)
                 mostrar_maquinas()
             except Exception as e:
                 snack(f"Falha: {e}", COR_ERRO)
+
+        def expedir_dialog(n_interno: str, maq_nome: str, obra_origem: str):
+            destinos = [o for o in obras_ativas if o != obra_origem] + ["Armazém", "Oficina"]
+            destinos = list(dict.fromkeys(destinos))  # unique preservando ordem
+            dd_dest = ft.Dropdown(
+                label="Destino", width=320,
+                options=[ft.dropdown.Option(d) for d in destinos],
+                value=destinos[0] if destinos else None,
+            )
+
+            def go(_=None):
+                if not dd_dest.value:
+                    snack("Escolhe o destino.", COR_ERRO); return
+                dlg.open = False
+                page.update()
+                confirmar(n_interno, maq_nome, obra_origem,
+                           acao="expedicao", obra_destino=dd_dest.value)
+
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text(f"Enviar {n_interno}"),
+                content=ft.Column([
+                    ft.Text(maq_nome, italic=True),
+                    ft.Text(f"De: {obra_origem}", size=12, color="grey"),
+                    dd_dest,
+                ], tight=True, spacing=10),
+                actions=[
+                    ft.TextButton("Cancelar",
+                                   on_click=lambda e: (setattr(dlg, "open", False),
+                                                         page.update())),
+                    ft.ElevatedButton("ENVIAR", on_click=go,
+                                       bgcolor=COR_PRIMARIA, color="white"),
+                ],
+            )
+            page.dialog = dlg; dlg.open = True; page.update()
 
         def renderizar_lista():
             lista_col.controls.clear()
@@ -414,15 +457,25 @@ def main(page: ft.Page):
 
             btn = None
             if obra_atual and obra_atual != "(Todas)":
-                btn = ft.ElevatedButton(
-                    "CONFIRMAR AQUI" if not ja_la else "✓ Aqui",
-                    icon=ft.icons.PLACE if not ja_la else ft.icons.CHECK,
-                    bgcolor=COR_OK if not ja_la else "grey",
-                    color="white",
-                    disabled=ja_la,
-                    on_click=lambda e, ni=n, nm=nome, ob=obra_atual:
-                        confirmar(ni, nm, ob),
-                )
+                if ja_la:
+                    # Máquina já está nesta obra → botão ENVIAR para outra
+                    btn = ft.ElevatedButton(
+                        "ENVIAR PARA...",
+                        icon=ft.icons.LOCAL_SHIPPING,
+                        bgcolor=COR_PRIMARIA,
+                        color="white",
+                        on_click=lambda e, ni=n, nm=nome, ob=obra_atual:
+                            expedir_dialog(ni, nm, ob),
+                    )
+                else:
+                    btn = ft.ElevatedButton(
+                        "CONFIRMAR AQUI",
+                        icon=ft.icons.PLACE,
+                        bgcolor=COR_OK,
+                        color="white",
+                        on_click=lambda e, ni=n, nm=nome, ob=obra_atual:
+                            confirmar(ni, nm, ob),
+                    )
 
             header = ft.Row([
                 ft.Text(n, size=14, weight="bold", color=COR_PRIMARIA),
@@ -476,6 +529,11 @@ def main(page: ft.Page):
         page.update()
 
     # -------- NOVO PEDIDO --------
+    CATEGORIAS_MATERIAL = [
+        "Multicamada (mm)", "PPR (mm)", "Ferro", "Ferro roscado",
+        "Latão roscado", "Soldar Ferro", "Parafusos", "Outros",
+    ]
+
     def mostrar_pedido():
         page.clean()
         try:
@@ -492,6 +550,9 @@ def main(page: ft.Page):
             options=[ft.dropdown.Option(o) for o in obras_ativas],
         )
 
+        tipo_state = {"tipo": "Consumíveis"}
+
+        # --- Widgets Consumíveis ---
         subs = sorted({str(r.get("subcategoria") or "")
                        for r in cons_rows if r.get("subcategoria")})
         dd_sub = ft.Dropdown(
@@ -518,17 +579,60 @@ def main(page: ft.Page):
             page.update()
         dd_sub.on_change = on_sub_change
 
+        bloco_consumiveis = ft.Column([dd_sub, dd_item], spacing=10)
+
+        # --- Widgets Material ---
+        dd_cat = ft.Dropdown(
+            label="Categoria",
+            options=[ft.dropdown.Option(c) for c in CATEGORIAS_MATERIAL],
+            value=CATEGORIAS_MATERIAL[0],
+        )
+        tf_desc_mat = ft.TextField(
+            label="Descrição do material",
+            hint_text='Ex: Tubo galv. 1" 6m  |  Curva 90° 3/4" MxF',
+            multiline=True, min_lines=1, max_lines=3,
+        )
+        bloco_material = ft.Column([dd_cat, tf_desc_mat], spacing=10, visible=False)
+
+        # --- Radio Tipo ---
+        def on_tipo_change(e):
+            tipo_state["tipo"] = e.control.value
+            bloco_consumiveis.visible = (tipo_state["tipo"] == "Consumíveis")
+            bloco_material.visible = (tipo_state["tipo"] == "Material")
+            page.update()
+
+        rg_tipo = ft.RadioGroup(
+            value="Consumíveis",
+            on_change=on_tipo_change,
+            content=ft.Row([
+                ft.Radio(value="Consumíveis", label="Consumíveis"),
+                ft.Radio(value="Material", label="Material"),
+            ], spacing=20),
+        )
+
         tf_qtd = ft.TextField(label="Qtd", value="1",
                                keyboard_type=ft.KeyboardType.NUMBER)
-        tf_det = ft.TextField(label="Detalhes (opcional)",
+        tf_det = ft.TextField(label="Detalhes / notas (opcional)",
                                hint_text="ex: urgente para amanhã")
         sw_urg = ft.Switch(label="URGENTE", active_color=COR_URG)
 
         def enviar(_=None):
             if not dd_obra.value:
                 snack("Escolhe a obra.", COR_ERRO); return
-            if not dd_item.value:
-                snack("Escolhe o item.", COR_ERRO); return
+
+            tipo = tipo_state["tipo"]
+            if tipo == "Consumíveis":
+                if not dd_item.value:
+                    snack("Escolhe o item.", COR_ERRO); return
+                item_v = dd_item.value
+                subcat_v = dd_sub.value or ""
+            else:  # Material
+                desc = (tf_desc_mat.value or "").strip()
+                if not desc:
+                    snack("Escreve a descrição do material.", COR_ERRO); return
+                item_v = desc
+                subcat_v = dd_cat.value or ""
+
             qtd = (tf_qtd.value or "1").strip()
             try:
                 qtd_i = int(float(qtd.replace(",", ".")))
@@ -540,9 +644,9 @@ def main(page: ft.Page):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "utilizador": state["user"] or "mobile",
                 "obra": dd_obra.value,
-                "tipo": "Consumíveis",
-                "subcategoria": dd_sub.value or "",
-                "item": dd_item.value,
+                "tipo": tipo,
+                "subcategoria": subcat_v,
+                "item": item_v,
                 "detalhes": tf_det.value or "",
                 "qtd": str(qtd_i),
                 "urgente": "TRUE" if sw_urg.value else "FALSE",
@@ -560,7 +664,11 @@ def main(page: ft.Page):
             top_bar("Novo Pedido", back=lambda e: mostrar_portal()),
             ft.Container(padding=15, content=ft.Column([
                 dd_obra,
-                dd_sub, dd_item,
+                ft.Text("Tipo de pedido", size=12, color="grey"),
+                rg_tipo,
+                ft.Divider(),
+                bloco_consumiveis,
+                bloco_material,
                 ft.Row([tf_qtd, sw_urg], spacing=10),
                 tf_det,
                 ft.Container(height=10),
@@ -620,6 +728,100 @@ def main(page: ft.Page):
             ft.Container(padding=15, content=body, expand=True),
         )
         page.update()
+
+
+    # -------- RECEÇÃO DE GÁS --------
+    TIPOS_GAS = ["Argon", "Mistura MIG", "CO2"]
+    TAMANHOS_GARRAFA = ["F10 P200", "F20 P200", "F50 P200", "F20 P300", "F50 P300"]
+
+    def mostrar_gas():
+        page.clean()
+        try:
+            obras_rows = client.call("get_obras", ttl=60)
+        except Exception as e:
+            snack(f"Erro a ler obras: {e}", COR_ERRO)
+            return mostrar_portal()
+
+        obras_ativas = [str(r.get("nome")) for r in obras_rows
+                         if str(r.get("estado") or "Ativa") == "Ativa"]
+        dd_obra = ft.Dropdown(
+            label="Obra", value=obras_ativas[0] if obras_ativas else None,
+            options=[ft.dropdown.Option(o) for o in obras_ativas],
+        )
+        dd_gas = ft.Dropdown(
+            label="Tipo de gás", value=TIPOS_GAS[0],
+            options=[ft.dropdown.Option(g) for g in TIPOS_GAS],
+        )
+        dd_tam = ft.Dropdown(
+            label="Tamanho de garrafa", value=TAMANHOS_GARRAFA[0],
+            options=[ft.dropdown.Option(t) for t in TAMANHOS_GARRAFA],
+        )
+        tf_ent = ft.TextField(
+            label="Nº garrafas CHEIAS entregues", value="0",
+            keyboard_type=ft.KeyboardType.NUMBER,
+        )
+        tf_dev = ft.TextField(
+            label="Nº garrafas VAZIAS devolvidas", value="0",
+            keyboard_type=ft.KeyboardType.NUMBER,
+        )
+        tf_notas = ft.TextField(label="Notas (opcional)")
+
+        def enviar(_=None):
+            if not dd_obra.value:
+                snack("Escolhe a obra.", COR_ERRO); return
+            try:
+                n_ent = int(float((tf_ent.value or "0").replace(",", ".")))
+                n_dev = int(float((tf_dev.value or "0").replace(",", ".")))
+            except Exception:
+                snack("Quantidades têm de ser números.", COR_ERRO); return
+            if n_ent <= 0 and n_dev <= 0:
+                snack("Indica pelo menos entregas OU devoluções (> 0).", COR_ERRO)
+                return
+
+            row = {
+                "uuid": str(uuid.uuid4()),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "utilizador": state["user"] or "mobile",
+                "obra": dd_obra.value,
+                "gas_tipo": dd_gas.value,
+                "garrafa_tipo": dd_tam.value,
+                "n_entregues": str(n_ent),
+                "n_devolvidas": str(n_dev),
+                "notas": tf_notas.value or "",
+                "processado": "FALSE",
+            }
+            try:
+                client.call("post_gas_rececao", {"row": row}, ttl=0)
+                snack(f"✓ Gás registado: +{n_ent} cheias / -{n_dev} vazias", COR_OK)
+                mostrar_portal()
+            except Exception as e:
+                snack(f"Falha a enviar: {e}", COR_ERRO)
+
+        page.add(
+            top_bar("Receção de Gás", back=lambda e: mostrar_portal()),
+            ft.Container(padding=15, content=ft.Column([
+                dd_obra,
+                dd_gas,
+                dd_tam,
+                ft.Divider(),
+                ft.Text("Garrafas cheias entregues pelo fornecedor:",
+                        size=12, color="grey"),
+                tf_ent,
+                ft.Text("Garrafas vazias devolvidas ao fornecedor:",
+                        size=12, color="grey"),
+                tf_dev,
+                tf_notas,
+                ft.Container(height=10),
+                ft.ElevatedButton("ENVIAR REGISTO", icon=ft.icons.SEND,
+                                  on_click=enviar, height=55,
+                                  bgcolor="#7B1FA2", color="white"),
+                ft.Container(height=5),
+                ft.Text("💡 Podes registar só entregas, só devoluções, ou ambas.",
+                         size=11, italic=True, color="grey"),
+            ], spacing=10, scroll=ft.ScrollMode.AUTO)),
+        )
+        page.update()
+
 
     # -------- START --------
     try:
