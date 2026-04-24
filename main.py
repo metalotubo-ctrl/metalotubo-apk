@@ -411,29 +411,47 @@ def main(page: ft.Page):
             obra_sel = dd_obra.value or ""
 
             if obra_sel and obra_sel != "(Todas)":
+                # 1) A caminho desta obra (em trânsito)
+                em_transito = [r for r in maqs_rows
+                               if str(r.get("em_transito_para") or "").strip() == obra_sel]
+                # 2) Já na obra
                 filtradas = [r for r in maqs_rows
-                              if str(r.get("local") or "") == obra_sel]
-                # Mostra também máquinas sem local definido (candidatas)
+                              if str(r.get("local") or "") == obra_sel
+                              and str(r.get("em_transito_para") or "").strip() == ""]
+                # 3) Sem localização
                 sem_local = [r for r in maqs_rows
-                              if not str(r.get("local") or "").strip()]
-                if not filtradas and not sem_local:
+                              if not str(r.get("local") or "").strip()
+                              and not str(r.get("em_transito_para") or "").strip()]
+
+                if em_transito:
+                    lista_col.controls.append(ft.Text(
+                        f"🚚 A caminho ({len(em_transito)})",
+                        size=13, weight="bold", color="#1976D2"))
+                    for r in em_transito:
+                        lista_col.controls.append(
+                            _card_maq(r, obra_sel, False, em_transito_aqui=True))
+
+                if filtradas:
+                    lista_col.controls.append(ft.Container(height=10))
+                    lista_col.controls.append(ft.Text(
+                        f"Em '{obra_sel}' ({len(filtradas)})",
+                        size=13, weight="bold", color=COR_OK))
+                    for r in filtradas:
+                        lista_col.controls.append(_card_maq(r, obra_sel, True))
+
+                if sem_local:
+                    lista_col.controls.append(ft.Container(height=10))
+                    lista_col.controls.append(ft.Text(
+                        f"Sem localização ({len(sem_local)})",
+                        size=13, weight="bold", color="#F57C00"))
+                    for r in sem_local:
+                        lista_col.controls.append(_card_maq(r, obra_sel, False))
+
+                if not em_transito and not filtradas and not sem_local:
                     lista_col.controls.append(
-                        ft.Text(f"Sem máquinas em '{obra_sel}'.", italic=True)
+                        ft.Text(f"Nenhuma máquina relevante para '{obra_sel}'.",
+                                 italic=True)
                     )
-                else:
-                    if filtradas:
-                        lista_col.controls.append(ft.Text(
-                            f"Já em '{obra_sel}' ({len(filtradas)})",
-                            size=13, weight="bold", color=COR_OK))
-                        for r in filtradas:
-                            lista_col.controls.append(_card_maq(r, obra_sel, True))
-                    if sem_local:
-                        lista_col.controls.append(ft.Container(height=10))
-                        lista_col.controls.append(ft.Text(
-                            f"Sem localização ({len(sem_local)})",
-                            size=13, weight="bold", color="#F57C00"))
-                        for r in sem_local:
-                            lista_col.controls.append(_card_maq(r, obra_sel, False))
             else:
                 lista_col.controls.append(ft.Text(
                     f"{len(maqs_rows)} máquinas totais",
@@ -442,23 +460,35 @@ def main(page: ft.Page):
                     lista_col.controls.append(_card_maq(r, "", False))
             page.update()
 
-        def _card_maq(r: dict, obra_atual: str, ja_la: bool):
+        def _card_maq(r: dict, obra_atual: str, ja_la: bool,
+                       em_transito_aqui: bool = False):
             n = str(r.get("n_interno") or "")
             nome = str(r.get("maquina") or "")
             estado = str(r.get("estado") or "")
             local = str(r.get("local") or "—")
             resp = str(r.get("responsavel") or "")
+            destino = str(r.get("em_transito_para") or "")
 
             col_estado = {
                 "Disponível": COR_OK, "Operacional": COR_OK,
                 "Em reparação": COR_URG, "Avariada": COR_URG,
                 "Em uso": COR_PRIMARIA, "Ocupada": COR_PRIMARIA,
+                "Em trânsito": "#1976D2",
             }.get(estado, "grey")
 
             btn = None
-            if obra_atual and obra_atual != "(Todas)":
+            if em_transito_aqui:
+                # Máquina vem para esta obra → botão CONFIRMAR CHEGADA
+                btn = ft.ElevatedButton(
+                    "CONFIRMAR CHEGADA",
+                    icon=ft.icons.DOWNLOAD_DONE,
+                    bgcolor=COR_OK,
+                    color="white",
+                    on_click=lambda e, ni=n, nm=nome, ob=obra_atual:
+                        confirmar(ni, nm, ob),
+                )
+            elif obra_atual and obra_atual != "(Todas)":
                 if ja_la:
-                    # Máquina já está nesta obra → botão ENVIAR para outra
                     btn = ft.ElevatedButton(
                         "ENVIAR PARA...",
                         icon=ft.icons.LOCAL_SHIPPING,
@@ -488,7 +518,13 @@ def main(page: ft.Page):
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
 
             linha2 = ft.Text(nome, size=13)
-            linha3_items = [f"📍 {local}"]
+            linha3_items = []
+            if em_transito_aqui:
+                linha3_items.append(f"🚚 De: {local}")
+            else:
+                linha3_items.append(f"📍 {local}")
+                if destino:
+                    linha3_items.append(f"→ 🚚 {destino}")
             if resp:
                 linha3_items.append(f"👤 {resp}")
             linha3 = ft.Text("   ".join(linha3_items), size=11, color="grey")
