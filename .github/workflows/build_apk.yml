@@ -1,0 +1,43 @@
+
+✅ SOLUÇÃO A (recomendada) — Criar o ficheiro manualmente no GitHub
+No teu repositório, clica no botão verde "Add file" (topo direito) → "Create new file".
+
+Na caixa do nome do ficheiro, escreve isto exactamente (com as barras /):
+
+.github/workflows/build_apk.yml
+💡 Truque importante: à medida que escreves /, o GitHub cria a pasta automaticamente e salta para o campo seguinte. Não precisas de criar a pasta antes.
+
+Na grande caixa de texto de baixo, cola exactamente este conteúdo (copia tudo o que está entre as linhas):
+
+name: Build APK Android
+on:
+  push: { branches: [main, master] }
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '17' }
+      - uses: subosito/flutter-action@v2
+        with: { flutter-version: '3.24.5', channel: stable, cache: true }
+      - run: pip install flet==0.25.2
+      - run: |
+          mkdir -p assets
+          if [ -n "${{ secrets.APPS_SCRIPT_URL }}" ]; then
+            echo -n "${{ secrets.APPS_SCRIPT_URL }}" > assets/webhook_url.txt
+          fi
+      - run: |
+          flutter config --no-analytics
+          flet build apk --verbose --no-rich-output
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: metalotubo-apk
+          path: build/apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
