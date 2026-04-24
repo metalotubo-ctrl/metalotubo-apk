@@ -1,5 +1,5 @@
 /**
- * METALOTUBO — Apps Script webhook (v2 — com máquinas)
+ * METALOTUBO — Apps Script webhook (v3 — máquinas exp/rec + gás)
  */
 
 function doGet(e) { return _handle(e, "GET"); }
@@ -59,6 +59,10 @@ function _handle(e, method) {
         result = _appendRow(ss, "maquinas_mobile", params.row || {});
         break;
 
+      case "post_gas_rececao":
+        result = _appendRow(ss, "gas_rececao_mobile", params.row || {});
+        break;
+
       default:
         result = { error: "Ação desconhecida: " + action };
     }
@@ -94,7 +98,6 @@ function _readTab(ss, nome) {
 function _appendRow(ss, nome, rowObj) {
   var ws = ss.getSheetByName(nome);
   if (!ws) {
-    // Auto-cria worksheet com os headers da rowObj
     ws = ss.insertSheet(nome);
     ws.appendRow(Object.keys(rowObj));
   }
@@ -102,6 +105,14 @@ function _appendRow(ss, nome, rowObj) {
   if (!headers || headers.length === 0 || headers[0] === "") {
     headers = Object.keys(rowObj);
     ws.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+  // Extend headers if new keys came in
+  var keys = Object.keys(rowObj);
+  for (var k = 0; k < keys.length; k++) {
+    if (headers.indexOf(keys[k]) < 0) {
+      headers.push(keys[k]);
+      ws.getRange(1, headers.length).setValue(keys[k]);
+    }
   }
   var linha = headers.map(function (h) {
     var v = rowObj[h];
