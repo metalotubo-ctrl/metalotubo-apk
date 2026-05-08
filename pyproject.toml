@@ -1,0 +1,15 @@
+[project]
+name = "metalotubo_mobile"
+version = "1.0.8"
+description = "MetaloTubo Mobile"
+requires-python = ">=3.9"
+dependencies = ["flet==0.25.2"]
+
+[tool.flet]
+org = "pt.metalotubo"
+product = "MetaloTubo Mobile"
+company = "MetaloTubo"
+copyright = "2025 MetaloTubo"
+
+[tool.flet.android]
+adaptive_icon_background = "#1A237E"
